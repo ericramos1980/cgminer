@@ -366,11 +366,13 @@ sharelog(const char*disposition, const struct work*work) {
 		return;
 	}
 
+	size_t ret;
 	mutex_lock(&sharelog_lock);
-	if (1 != fwrite(s, rv, 1, sharelog_file))
-		applog(LOG_ERR, "sharelog fwrite error");
+	ret = fwrite(s, rv, 1, sharelog_file);
 	fflush(sharelog_file);
 	mutex_unlock(&sharelog_lock);
+	if (1 != ret)
+		applog(LOG_ERR, "sharelog fwrite error");
 }
 
 static void add_pool(void)
