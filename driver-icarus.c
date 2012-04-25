@@ -330,9 +330,8 @@ static uint64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 	tcflush(fd, TCOFLUSH);
 #endif
 
-	gettimeofday(&tv_start, NULL);
-
 	ret = icarus_write(fd, ob_bin, sizeof(ob_bin));
+	gettimeofday(&tv_start, NULL);
 	if (ret) {
 		icarus_close(fd);
 		return 0;	/* This should never happen */
