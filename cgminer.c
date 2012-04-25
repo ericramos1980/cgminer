@@ -348,7 +348,8 @@ sharelog(const char*disposition, const struct work*work) {
 	}
 	char *data = bin2hex(work->data, sizeof(work->data));
 	if (unlikely(!data)) {
-		free(target); free(hash);
+		free(target);
+		free(hash);
 		applog(LOG_ERR, "sharelog data OOM");
 		return;
 	}
@@ -357,9 +358,11 @@ sharelog(const char*disposition, const struct work*work) {
 	char s[1024];
 	int rv;
 	rv = snprintf(s, sizeof(s), "%lu,%s,%s,%s,%s%u,%u,%s,%s\n", t, disposition, target, pool->rpc_url, cgpu->api->name, cgpu->device_id, thr_id, hash, data);
-	free(target); free(hash); free(data);
+	free(target);
+	free(hash);
+	free(data);
 	if (rv >= sizeof(s))
-		s[sizeof(s)-1] = '\0';
+		s[sizeof(s) - 1] = '\0';
 	else
 	if (rv < 0) {
 		applog(LOG_ERR, "sharelog printf error");
