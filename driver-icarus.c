@@ -131,7 +131,7 @@ static int icarus_open(const char *devpath)
 #endif
 }
 
-static int icarus_gets(unsigned char *buf, size_t bufLen, int fd, volatile unsigned long *wr, int read_count)
+static int icarus_gets(unsigned char *buf, size_t bufLen, int fd, volatile unsigned long *abort_flag, int read_count)
 {
 	ssize_t ret = 0;
 	int rc = 0;
@@ -164,7 +164,7 @@ static int icarus_gets(unsigned char *buf, size_t bufLen, int fd, volatile unsig
 		}
 
 		rc++;
-		if (*wr) {
+		if (*abort_flag) {
 			rc *= ICARUS_READ_FAULT_DECISECONDS;
 			applog(LOG_DEBUG,
 			       "Icarus Read: Work restart at %d.%d seconds", rc / 10, rc % 10);
@@ -231,8 +231,8 @@ static bool icarus_detect_one(const char *devpath)
 	icarus_write(fd, ob_bin, sizeof(ob_bin));
 
 	memset(nonce_bin, 0, sizeof(nonce_bin));
-	volatile unsigned long wr = 0;
-	icarus_gets(nonce_bin, sizeof(nonce_bin), fd, &wr, 1);
+	volatile unsigned long abort_flag = 0;
+	icarus_gets(nonce_bin, sizeof(nonce_bin), fd, &abort_flag, 1);
 
 	icarus_close(fd);
 
@@ -300,7 +300,7 @@ static bool icarus_prepare(struct thr_info *thr)
 static uint64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 				__maybe_unused uint64_t max_nonce)
 {
-	volatile unsigned long *wr = &work_restart[thr->id].restart;
+	volatile unsigned long *abort_flag = &work_restart[thr->id].restart;
 
 	struct cgpu_info *icarus;
 	int fd;
@@ -347,7 +347,7 @@ static uint64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 
 	/* Icarus will return 8 bytes nonces or nothing */
 	memset(nonce_bin, 0, sizeof(nonce_bin));
-	ret = icarus_gets(nonce_bin, sizeof(nonce_bin), fd, wr,
+	ret = icarus_gets(nonce_bin, sizeof(nonce_bin), fd, abort_flag,
 	                  ICARUS_READ_FAULT_COUNT);
 
 	gettimeofday(&tv_end, NULL);
