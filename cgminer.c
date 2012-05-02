@@ -1166,46 +1166,38 @@ static bool work_decode(const json_t *val, struct work *work)
 		applog(LOG_ERR, "JSON inval data");
 		goto err_out;
 	}
+	swap32le(work->data, 32);
 
 	if (likely(!jobj_binary(val, "midstate",
 			 work->midstate, sizeof(work->midstate), false))) {
 		// Calculate it ourselves
-		union {
-			unsigned char c[64];
-			uint32_t i[16];
-		} data;
-		int swapcounter;
-		for (swapcounter = 0; swapcounter < 16; swapcounter++)
-			data.i[swapcounter] = swab32(((uint32_t*) (work->data))[swapcounter]);
+#ifdef __BIG_ENDIAN__
+		const unsigned char *data = work->data;
+#else
+		unsigned char data[64];
+		swap32(data, work->data, 16);
+#endif
 		sha2_context ctx;
 		sha2_starts( &ctx, 0 );
-		sha2_update( &ctx, data.c, 64 );
+		sha2_update( &ctx, data, 64 );
 		memcpy(work->midstate, ctx.state, sizeof(work->midstate));
 	}
+	else
+		swap32le(work->midstate, 8);
 
 	if (likely(!jobj_binary(val, "hash1", work->hash1, sizeof(work->hash1), false))) {
 		// Always the same anyway
 		memcpy(work->hash1, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x80\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\1\0\0", 64);
 	}
+	swap32le(work->hash1, 16);
 
 	if (unlikely(!jobj_binary(val, "target", work->target, sizeof(work->target), true))) {
 		applog(LOG_ERR, "JSON inval target");
 		goto err_out;
 	}
+	swap32le(work->target, 8);
 
 	memset(work->hash, 0, sizeof(work->hash));
-
-#ifdef __BIG_ENDIAN__
-        int swapcounter = 0;
-        for (swapcounter = 0; swapcounter < 32; swapcounter++)
-            (((uint32_t*) (work->data))[swapcounter]) = swab32(((uint32_t*) (work->data))[swapcounter]);
-        for (swapcounter = 0; swapcounter < 16; swapcounter++)
-            (((uint32_t*) (work->hash1))[swapcounter]) = swab32(((uint32_t*) (work->hash1))[swapcounter]);
-        for (swapcounter = 0; swapcounter < 8; swapcounter++)
-            (((uint32_t*) (work->midstate))[swapcounter]) = swab32(((uint32_t*) (work->midstate))[swapcounter]);
-        for (swapcounter = 0; swapcounter < 8; swapcounter++)
-            (((uint32_t*) (work->target))[swapcounter]) = swab32(((uint32_t*) (work->target))[swapcounter]);
-#endif
 
 	gettimeofday(&work->tv_staged, NULL);
 
@@ -1597,11 +1589,7 @@ static bool submit_upstream_work(const struct work *work, CURL *curl)
 	char hashshow[64+1] = "";
 	bool isblock;
 
-#ifdef __BIG_ENDIAN__
-        int swapcounter = 0;
-        for (swapcounter = 0; swapcounter < 32; swapcounter++)
-            (((uint32_t*) (work->data))[swapcounter]) = swab32(((uint32_t*) (work->data))[swapcounter]);
-#endif
+	swap32le(work->data, 32);
 
 	/* build hex string */
 	hexstr = bin2hex(work->data, sizeof(work->data));
