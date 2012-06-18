@@ -4021,7 +4021,7 @@ void *miner_thread(void *userdata)
 	/* Try to cycle approximately 5 times before each log update */
 	long actualcs;
 	struct timeval tv_start, tv_end, tv_workstart, tv_lastupdate;
-	struct timeval diff, wdiff = {0, 0};
+	struct timeval diff, wdiff = {0, 0}, tdiff;
 	uint32_t max_nonce;
 	uint32_t last_nonce;
 	unsigned long long hashes_done = 0;
@@ -4119,8 +4119,9 @@ devfail:
 						if (unlikely(work_restart[thr_id].restart))
 							goto work_restart;
 
-						// TODO: use epoll on Linux
-						usleep(mythr->job_idle_usec);
+						// NOTE: Don't need to watch sockets here, since it should only be used for polling-based interfaces
+						ms_to_timeval(mythr->job_idle_usec / 1000, &tdiff);
+						restart_wait(&tdiff);
 					}
 
 					if (unlikely(work_restart[thr_id].restart))

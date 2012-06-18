@@ -83,6 +83,12 @@ void *alloca (size_t);
  #endif
 #endif
 
+static inline void ms_to_timeval(unsigned int mstime, struct timeval *ttime)
+{
+	ttime->tv_sec = mstime / 1000;
+	ttime->tv_usec = mstime * 1000 - (ttime->tv_sec * 1000000);
+}
+
 
 #ifdef HAVE_ADL
  #include "ADL_SDK/adl_sdk.h"
