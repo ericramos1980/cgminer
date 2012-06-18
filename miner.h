@@ -426,6 +426,7 @@ struct thr_info {
 	bool	job_running;
 	useconds_t job_idle_usec;
 	bool	can_limit_work;
+	bool	results_delayed;
 
 	// These two only used for backward-compatibility with deprecated scanhash device API:
 	uint32_t	first_nonce;
