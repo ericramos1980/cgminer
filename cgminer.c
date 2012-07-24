@@ -109,7 +109,7 @@ int opt_g_threads = 2;
 int gpu_threads;
 #endif
 #ifdef USE_SCRYPT
-bool opt_scrypt;
+bool opt_scrypt = true;
 #endif
 bool opt_restart = true;
 static bool opt_nogpu;
@@ -962,9 +962,9 @@ static struct opt_table opt_config_table[] = {
 		     set_schedtime, NULL, &schedstop,
 		     "Set a time of day in HH:MM to stop mining (will quit without a start time)"),
 #ifdef USE_SCRYPT
-	OPT_WITHOUT_ARG("--scrypt",
-			opt_set_bool, &opt_scrypt,
-			"Use the scrypt algorithm for mining (litecoin only)"),
+	OPT_WITHOUT_ARG("--sha256",
+			opt_set_invbool, &opt_scrypt,
+			"Use the SHA256 algorithm for mining"),
 #ifdef HAVE_OPENCL
 	OPT_WITH_ARG("--shaders",
 		     set_shaders, NULL, NULL,

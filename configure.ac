@@ -134,7 +134,7 @@ AC_ARG_ENABLE([adl],
 	[adl=$enableval]
 	)
 
-scrypt="no"
+scrypt="yes"
 
 if test "x$opencl" = xyes; then
 	if test "x$adl" != xno; then
