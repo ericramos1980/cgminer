@@ -4531,7 +4531,7 @@ static void age_work(void)
 #define WATCHDOG_DEAD_TIME		600
 #define WATCHDOG_SICK_COUNT		(WATCHDOG_SICK_TIME/WATCHDOG_INTERVAL)
 #define WATCHDOG_DEAD_COUNT		(WATCHDOG_DEAD_TIME/WATCHDOG_INTERVAL)
-#define WATCHDOG_LOW_HASH		1.0 /* consider < 1MH too low for any device */
+#define WATCHDOG_LOW_HASH		0.1 /* consider < 1MH too low for any device */
 
 static void *watchdog_thread(void __maybe_unused *userdata)
 {
