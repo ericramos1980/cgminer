@@ -39,7 +39,7 @@
 	#include <fcntl.h>
 #endif
 
-#if defined(__linux) && defined(cpu_set_t) /* Linux specific policy and affinity management */
+#if 0 && defined(__linux) && defined(cpu_set_t) /* Linux specific policy and affinity management */
 #include <sched.h>
 static inline void drop_policy(void)
 {
