@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #ifdef HAVE_CURSES
 #include <curses.h>
@@ -31,6 +32,10 @@
 #include <tchar.h>
 #endif
 #include "adl_functions.h"
+
+#ifndef HAVE_CURSES
+#define wlogprint(...)  applog(LOG_WARNING, __VA_ARGS__)
+#endif
 
 bool adl_active;
 bool opt_reorder = false;
@@ -692,7 +697,11 @@ int gpu_fanpercent(int gpu)
 	unlock_adl();
 	if (unlikely(ga->has_fanspeed && ret == -1)) {
 		applog(LOG_WARNING, "GPU %d stopped reporting fanspeed due to driver corruption", gpu);
-		applog(LOG_WARNING, "You will need to start cgminer from scratch to correct this");
+		if (opt_restart) {
+			applog(LOG_WARNING, "Restart enabled, will attempt to restart cgminer");
+			applog(LOG_WARNING, "You can disable this with the --no-restart option");
+			app_restart();
+		}
 		applog(LOG_WARNING, "Disabling fanspeed monitoring on this device");
 		ga->has_fanspeed = false;
 		if (ga->twin) {
@@ -759,6 +768,7 @@ bool gpu_stats(int gpu, float *temp, int *engineclock, int *memclock, float *vdd
 	return true;
 }
 
+#ifdef HAVE_CURSES
 static void get_enginerange(int gpu, int *imin, int *imax)
 {
 	struct gpu_adl *ga;
@@ -771,6 +781,7 @@ static void get_enginerange(int gpu, int *imin, int *imax)
 	*imin = ga->lpOdParameters.sEngineClock.iMin / 100;
 	*imax = ga->lpOdParameters.sEngineClock.iMax / 100;
 }
+#endif
 
 int set_engineclock(int gpu, int iEngineClock)
 {
@@ -819,6 +830,7 @@ out:
 	return ret;
 }
 
+#ifdef HAVE_CURSES
 static void get_memoryrange(int gpu, int *imin, int *imax)
 {
 	struct gpu_adl *ga;
@@ -831,6 +843,7 @@ static void get_memoryrange(int gpu, int *imin, int *imax)
 	*imin = ga->lpOdParameters.sMemoryClock.iMin / 100;
 	*imax = ga->lpOdParameters.sMemoryClock.iMax / 100;
 }
+#endif
 
 int set_memoryclock(int gpu, int iMemoryClock)
 {
@@ -871,6 +884,7 @@ out:
 	return ret;
 }
 
+#ifdef HAVE_CURSES
 static void get_vddcrange(int gpu, float *imin, float *imax)
 {
 	struct gpu_adl *ga;
@@ -884,7 +898,6 @@ static void get_vddcrange(int gpu, float *imin, float *imax)
 	*imax = (float)ga->lpOdParameters.sVddc.iMax / 1000;
 }
 
-#ifdef HAVE_CURSES
 static float curses_float(const char *query)
 {
 	float ret;
@@ -992,6 +1005,7 @@ int set_fanspeed(int gpu, int iFanSpeed)
 	return ret;
 }
 
+#ifdef HAVE_CURSES
 static int set_powertune(int gpu, int iPercentage)
 {
 	struct gpu_adl *ga;
@@ -1013,6 +1027,7 @@ static int set_powertune(int gpu, int iPercentage)
 	unlock_adl();
 	return ret;
 }
+#endif
 
 /* Returns whether the fanspeed is optimal already or not. The fan_window bool
  * tells us whether the current fanspeed is in the target range for fanspeeds.
@@ -1020,6 +1035,7 @@ static int set_powertune(int gpu, int iPercentage)
 static bool fan_autotune(int gpu, int temp, int fanpercent, int lasttemp, bool *fan_window)
 {
 	struct cgpu_info *cgpu = &gpus[gpu];
+	int tdiff = round(temp - lasttemp);
 	struct gpu_adl *ga = &cgpu->adl;
 	int top = gpus[gpu].gpu_fan;
 	int bot = gpus[gpu].min_fan;
@@ -1034,7 +1050,7 @@ static bool fan_autotune(int gpu, int temp, int fanpercent, int lasttemp, bool *
 		cgpu->device_last_not_well = time(NULL);
 		cgpu->device_not_well_reason = REASON_DEV_OVER_HEAT;
 		cgpu->dev_over_heat_count++;
-	} else if (temp > ga->targettemp && fanpercent < top && temp >= lasttemp) {
+	} else if (temp > ga->targettemp && fanpercent < top && tdiff >= 0) {
 		applog(LOG_DEBUG, "Temperature over target, increasing fanspeed");
 		if (temp > ga->targettemp + opt_hysteresis)
 			newpercent = ga->targetfan + 10;
@@ -1042,18 +1058,26 @@ static bool fan_autotune(int gpu, int temp, int fanpercent, int lasttemp, bool *
 			newpercent = ga->targetfan + 5;
 		if (newpercent > top)
 			newpercent = top;
-	} else if (fanpercent > bot && temp < ga->targettemp - opt_hysteresis && temp <= lasttemp) {
-		applog(LOG_DEBUG, "Temperature %d degrees below target, decreasing fanspeed", opt_hysteresis);
-		newpercent = ga->targetfan - 1;
+	} else if (fanpercent > bot && temp < ga->targettemp - opt_hysteresis) {
+		/* Detect large swings of 5 degrees or more and change fan by
+		 * a proportion more */
+		if (tdiff <= 0) {
+			applog(LOG_DEBUG, "Temperature %d degrees below target, decreasing fanspeed", opt_hysteresis);
+			newpercent = ga->targetfan - 1 + tdiff / 5;
+		} else if (tdiff >= 5) {
+			applog(LOG_DEBUG, "Temperature climbed %d while below target, increasing fanspeed", tdiff);
+			newpercent = ga->targetfan + tdiff / 5;
+		}
 	} else {
+
 		/* We're in the optimal range, make minor adjustments if the
 		 * temp is still drifting */
-		if (fanpercent > bot && temp < lasttemp && lasttemp < ga->targettemp) {
+		if (fanpercent > bot && tdiff < 0 && lasttemp < ga->targettemp) {
 			applog(LOG_DEBUG, "Temperature dropping while in target range, decreasing fanspeed");
-			newpercent = ga->targetfan - 1;
-		} else if (fanpercent < top && temp > lasttemp && temp > ga->targettemp - opt_hysteresis) {
+			newpercent = ga->targetfan + tdiff;
+		} else if (fanpercent < top && tdiff > 0 && temp > ga->targettemp - opt_hysteresis) {
 			applog(LOG_DEBUG, "Temperature rising while in target range, increasing fanspeed");
-			newpercent = ga->targetfan + 1;
+			newpercent = ga->targetfan + tdiff;
 		}
 	}
 

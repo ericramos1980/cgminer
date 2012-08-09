@@ -65,7 +65,7 @@
 #define ASSERT1(condition) __maybe_unused static char sizeof_uint32_t_must_be_4[(condition)?1:-1]
 ASSERT1(sizeof(uint32_t) == 4);
 
-#define ICARUS_READ_TIME ((double)ICARUS_READ_SIZE * (double)8.0 / (double)ICARUS_IO_SPEED)
+#define ICARUS_READ_TIME(baud) ((double)ICARUS_READ_SIZE * (double)8.0 / (double)(baud))
 
 // Fraction of a second, USB timeout is measured in
 // i.e. 10 means 1/10 of a second
@@ -176,10 +176,35 @@ struct ICARUS_INFO {
 	// (which will only affect W)
 	uint64_t history_count;
 	struct timeval history_time;
+
+	// icarus-options
+	int baud;
+	int work_division;
+	int fpga_count;
+	uint32_t nonce_mask;
 };
+
+#define END_CONDITION 0x0000ffff
 
 // One for each possible device
 static struct ICARUS_INFO **icarus_info;
+
+// Looking for options in --icarus-timing and --icarus-options:
+//
+// Code increments this each time we start to look at a device
+// However, this means that if other devices are checked by
+// the Icarus code (e.g. BFL) they will count in the option offset
+//
+// This, however, is deterministic so that's OK
+//
+// If we were to increment after successfully finding an Icarus
+// that would be random since an Icarus may fail and thus we'd
+// not be able to predict the option order
+//
+// This also assumes that serial_detect() checks them sequentially
+// and in the order specified on the command line
+//
+static int option_offset = -1;
 
 struct device_api icarus_api;
 
@@ -195,10 +220,10 @@ static void rev(unsigned char *s, size_t l)
 	}
 }
 
-#define icarus_open2(devpath, purge)  serial_open(devpath, 115200, ICARUS_READ_FAULT_DECISECONDS, purge)
-#define icarus_open(devpath)  icarus_open2(devpath, false)
+#define icarus_open2(devpath, baud, purge)  serial_open(devpath, baud, ICARUS_READ_FAULT_DECISECONDS, purge)
+#define icarus_open(devpath, baud)  icarus_open2(devpath, baud, false)
 
-static int icarus_gets(unsigned char *buf, int fd, struct timeval *tv_finish, int thr_id, int read_count)
+static int icarus_gets(unsigned char *buf, int fd, struct timeval *tv_finish, struct thr_info *thr, int read_count)
 {
 	ssize_t ret = 0;
 	int rc = 0;
@@ -232,7 +257,7 @@ static int icarus_gets(unsigned char *buf, int fd, struct timeval *tv_finish, in
 			return 1;
 		}
 
-		if (thr_id >= 0 && work_restart[thr_id].restart) {
+		if (thr->work_restart) {
 			if (opt_debug) {
 				applog(LOG_DEBUG,
 					"Icarus Read: Work restart at %.2f seconds",
@@ -272,7 +297,7 @@ static const char *timing_mode_str(enum timing_mode timing_mode)
 	}
 }
 
-static void set_timing_mode(struct cgpu_info *icarus)
+static void set_timing_mode(int this_option_offset, struct cgpu_info *icarus)
 {
 	struct ICARUS_INFO *info = icarus_info[icarus->device_id];
 	double Hs;
@@ -285,7 +310,7 @@ static void set_timing_mode(struct cgpu_info *icarus)
 		buf[0] = '\0';
 	else {
 		ptr = opt_icarus_timing;
-		for (i = 0; i < icarus->device_id; i++) {
+		for (i = 0; i < this_option_offset; i++) {
 			comma = strchr(ptr, ',');
 			if (comma == NULL)
 				break;
@@ -354,11 +379,122 @@ static void set_timing_mode(struct cgpu_info *icarus)
 
 	applog(LOG_DEBUG, "Icarus: Init: %d mode=%s read_count=%d Hs=%e",
 		icarus->device_id, timing_mode_str(info->timing_mode), info->read_count, info->Hs);
+}
 
+static uint32_t mask(int work_division)
+{
+	char err_buf[BUFSIZ+1];
+	uint32_t nonce_mask = 0x7fffffff;
+
+	// yes we can calculate these, but this way it's easy to see what they are
+	switch (work_division) {
+	case 1:
+		nonce_mask = 0xffffffff;
+		break;
+	case 2:
+		nonce_mask = 0x7fffffff;
+		break;
+	case 4:
+		nonce_mask = 0x3fffffff;
+		break;
+	case 8:
+		nonce_mask = 0x1fffffff;
+		break;
+	default:
+		sprintf(err_buf, "Invalid2 icarus-options for work_division (%d) must be 1, 2, 4 or 8", work_division);
+		quit(1, err_buf);
+	}
+
+	return nonce_mask;
+}
+
+static void get_options(int this_option_offset, int *baud, int *work_division, int *fpga_count)
+{
+	char err_buf[BUFSIZ+1];
+	char buf[BUFSIZ+1];
+	char *ptr, *comma, *colon, *colon2;
+	size_t max;
+	int i, tmp;
+
+	if (opt_icarus_options == NULL)
+		buf[0] = '\0';
+	else {
+		ptr = opt_icarus_options;
+		for (i = 0; i < this_option_offset; i++) {
+			comma = strchr(ptr, ',');
+			if (comma == NULL)
+				break;
+			ptr = comma + 1;
+		}
+
+		comma = strchr(ptr, ',');
+		if (comma == NULL)
+			max = strlen(ptr);
+		else
+			max = comma - ptr;
+
+		if (max > BUFSIZ)
+			max = BUFSIZ;
+		strncpy(buf, ptr, max);
+		buf[max] = '\0';
+	}
+
+	*baud = ICARUS_IO_SPEED;
+	*work_division = 2;
+	*fpga_count = 2;
+
+	if (*buf) {
+		colon = strchr(buf, ':');
+		if (colon)
+			*(colon++) = '\0';
+
+		if (*buf) {
+			tmp = atoi(buf);
+			switch (tmp) {
+			case 115200:
+				*baud = 115200;
+				break;
+			case 57600:
+				*baud = 57600;
+				break;
+			default:
+				sprintf(err_buf, "Invalid icarus-options for baud (%s) must be 115200 or 57600", buf);
+				quit(1, err_buf);
+			}
+		}
+
+		if (colon && *colon) {
+			colon2 = strchr(colon, ':');
+			if (colon2)
+				*(colon2++) = '\0';
+
+			if (*colon) {
+				tmp = atoi(colon);
+				if (tmp == 1 || tmp == 2 || tmp == 4 || tmp == 8)
+					*work_division = tmp;
+				else {
+					sprintf(err_buf, "Invalid icarus-options for work_division (%s) must be 1, 2, 4 or 8", colon);
+					quit(1, err_buf);
+				}
+			}
+
+			if (colon2 && *colon2) {
+				tmp = atoi(colon2);
+				if (tmp > 0 && tmp <= *work_division)
+					*fpga_count = tmp;
+				else {
+					sprintf(err_buf, "Invalid icarus-options for fpga_count (%s) must be >0 and <=work_division (%d)", colon2, *work_division);
+					quit(1, err_buf);
+				}
+			}
+		}
+	}
 }
 
 static bool icarus_detect_one(const char *devpath)
 {
+	int this_option_offset = ++option_offset;
+
 	struct ICARUS_INFO *info;
 	struct timeval tv_start, tv_finish;
 	int fd;
@@ -379,9 +515,13 @@ static bool icarus_detect_one(const char *devpath)
 	unsigned char ob_bin[64], nonce_bin[ICARUS_READ_SIZE];
 	char *nonce_hex;
 
+	int baud, work_division, fpga_count;
+
+	get_options(this_option_offset, &baud, &work_division, &fpga_count);
+
 	applog(LOG_DEBUG, "Icarus Detect: Attempting to open %s", devpath);
 
-	fd = icarus_open2(devpath, true);
+	fd = icarus_open2(devpath, baud, true);
 	if (unlikely(fd == -1)) {
 		applog(LOG_ERR, "Icarus Detect: Failed to open %s", devpath);
 		return false;
@@ -392,7 +532,10 @@ static bool icarus_detect_one(const char *devpath)
 	gettimeofday(&tv_start, NULL);
 
 	memset(nonce_bin, 0, sizeof(nonce_bin));
-	icarus_gets(nonce_bin, fd, &tv_finish, -1, 1);
+	struct thr_info dummy = {
+		.work_restart = false,
+	};
+	icarus_gets(nonce_bin, fd, &tv_finish, &dummy, 1);
 
 	icarus_close(fd);
 
@@ -426,6 +569,9 @@ static bool icarus_detect_one(const char *devpath)
 	applog(LOG_INFO, "Found Icarus at %s, mark as %d",
 		devpath, icarus->device_id);
 
+	applog(LOG_DEBUG, "Icarus: Init: %d baud=%d work_division=%d fpga_count=%d",
+		icarus->device_id, baud, work_division, fpga_count);
+
 	// Since we are adding a new device on the end it needs to always be allocated
 	icarus_info[icarus->device_id] = (struct ICARUS_INFO *)malloc(sizeof(struct ICARUS_INFO));
 	if (unlikely(!(icarus_info[icarus->device_id])))
@@ -436,10 +582,15 @@ static bool icarus_detect_one(const char *devpath)
 	// Initialise everything to zero for a new device
 	memset(info, 0, sizeof(struct ICARUS_INFO));
 
-	info->golden_hashes = (golden_nonce_val & 0x7fffffff) << 1;
+	info->baud = baud;
+	info->work_division = work_division;
+	info->fpga_count = fpga_count;
+	info->nonce_mask = mask(work_division);
+
+	info->golden_hashes = (golden_nonce_val & info->nonce_mask) * fpga_count;
 	timersub(&tv_finish, &tv_start, &(info->golden_tv));
 
-	set_timing_mode(icarus);
+	set_timing_mode(this_option_offset, icarus);
 
 	return true;
 }
@@ -455,7 +606,7 @@ static bool icarus_prepare(struct thr_info *thr)
 
 	struct timeval now;
 
-	int fd = icarus_open(icarus->device_path);
+	int fd = icarus_open(icarus->device_path, icarus_info[icarus->device_id]->baud);
 	if (unlikely(-1 == fd)) {
 		applog(LOG_ERR, "Failed to open Icarus on %s",
 		       icarus->device_path);
@@ -471,10 +622,9 @@ static bool icarus_prepare(struct thr_info *thr)
 	return true;
 }
 
-static uint64_t icarus_scanhash(struct thr_info *thr, struct work *work,
-				__maybe_unused uint64_t max_nonce)
+static int64_t icarus_scanhash(struct thr_info *thr, struct work *work,
+				__maybe_unused int64_t max_nonce)
 {
-	const int thr_id = thr->id;
 	struct cgpu_info *icarus;
 	int fd;
 	int ret;
@@ -484,7 +634,7 @@ static uint64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 	unsigned char ob_bin[64], nonce_bin[ICARUS_READ_SIZE];
 	char *ob_hex;
 	uint32_t nonce;
-	uint64_t hash_count;
+	int64_t hash_count;
 	struct timeval tv_start, tv_finish, elapsed;
 	struct timeval tv_history_start, tv_history_finish;
 	double Ti, Xi;
@@ -494,9 +644,9 @@ static uint64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 	int count;
 	double Hs, W, fullnonce;
 	int read_count;
-	uint64_t estimate_hashes;
+	int64_t estimate_hashes;
 	uint32_t values;
-	uint64_t hash_count_range;
+	int64_t hash_count_range;
 
 	elapsed.tv_sec = elapsed.tv_usec = 0;
 
@@ -513,7 +663,7 @@ static uint64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 #endif
 	ret = icarus_write(fd, ob_bin, sizeof(ob_bin));
 	if (ret)
-		return 0;	/* This should never happen */
+		return -1;	/* This should never happen */
 
 	gettimeofday(&tv_start, NULL);
 
@@ -529,7 +679,7 @@ static uint64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 	/* Icarus will return 4 bytes (ICARUS_READ_SIZE) nonces or nothing */
 	memset(nonce_bin, 0, sizeof(nonce_bin));
 	info = icarus_info[icarus->device_id];
-	ret = icarus_gets(nonce_bin, fd, &tv_finish, thr_id, info->read_count);
+	ret = icarus_gets(nonce_bin, fd, &tv_finish, thr, info->read_count);
 
 	work->blk.nonce = 0xffffffff;
 	memcpy((char *)&nonce, nonce_bin, sizeof(nonce_bin));
@@ -563,11 +713,9 @@ static uint64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 
 	submit_nonce(thr, work, nonce);
 
-	hash_count = (nonce & 0x7fffffff);
-	if (hash_count++ == 0x7fffffff)
-		hash_count = 0xffffffff;
-	else
-		hash_count <<= 1;
+	hash_count = (nonce & info->nonce_mask);
+	hash_count++;
+	hash_count *= info->fpga_count;
 
 	if (opt_debug || info->do_icarus_timing)
 		timersub(&tv_finish, &tv_start, &elapsed);
@@ -578,7 +726,9 @@ static uint64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 	}
 
 	// ignore possible end condition values
-	if (info->do_icarus_timing && (nonce & 0x7fffffff) > 0x000fffff && (nonce & 0x7fffffff) < 0x7ff00000) {
+	if (info->do_icarus_timing
+	&&  ((nonce & info->nonce_mask) > END_CONDITION)
+	&&  ((nonce & info->nonce_mask) < (info->nonce_mask & ~END_CONDITION))) {
 		gettimeofday(&tv_history_start, NULL);
 
 		history0 = &(info->history[0]);
@@ -588,7 +738,7 @@ static uint64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 
 		Ti = (double)(elapsed.tv_sec)
 			+ ((double)(elapsed.tv_usec))/((double)1000000)
-			- ICARUS_READ_TIME;
+			- ((double)ICARUS_READ_TIME(info->baud));
 		Xi = (double)hash_count;
 		history0->sumXiTi += Xi * Ti;
 		history0->sumXi += Xi;
@@ -676,23 +826,33 @@ static uint64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 	return hash_count;
 }
 
-static void icarus_api_stats(char *buf, struct cgpu_info *cgpu, bool isjson)
+static struct api_data *icarus_api_stats(struct cgpu_info *cgpu)
 {
+	struct api_data *root = NULL;
 	struct ICARUS_INFO *info = icarus_info[cgpu->device_id];
 
 	// Warning, access to these is not locked - but we don't really
 	// care since hashing performance is way more important than
 	// locking access to displaying API debug 'stats'
-	sprintf(buf, isjson
-		? "\"read_count\":%d,\"fullnonce\":%f,\"count\":%d,\"Hs\":%.15f,\"W\":%f,\"total_values\":%u,\"range\":%"PRIu64",\"history_count\":%"PRIu64",\"history_time\":%f,\"min_data_count\":%u,\"timing_values\":%u"
-		: "read_count=%d,fullnonce=%f,count=%d,Hs=%.15f,W=%f,total_values=%u,range=%"PRIu64",history_count=%"PRIu64",history_time=%f,min_data_count=%u,timing_values=%u",
-		info->read_count, info->fullnonce,
-		info->count, info->Hs, info->W,
-		info->values, info->hash_count_range,
-		info->history_count,
-		(double)(info->history_time.tv_sec)
-			+ ((double)(info->history_time.tv_usec))/((double)1000000),
-		info->min_data_count, info->history[0].values);
+	// If locking becomes an issue for any of them, use copy_data=true also
+	root = api_add_int(root, "read_count", &(info->read_count), false);
+	root = api_add_double(root, "fullnonce", &(info->fullnonce), false);
+	root = api_add_int(root, "count", &(info->count), false);
+	root = api_add_hs(root, "Hs", &(info->Hs), false);
+	root = api_add_double(root, "W", &(info->W), false);
+	root = api_add_uint(root, "total_values", &(info->values), false);
+	root = api_add_uint64(root, "range", &(info->hash_count_range), false);
+	root = api_add_uint64(root, "history_count", &(info->history_count), false);
+	root = api_add_timeval(root, "history_time", &(info->history_time), false);
+	root = api_add_uint(root, "min_data_count", &(info->min_data_count), false);
+	root = api_add_uint(root, "timing_values", &(info->history[0].values), false);
+	root = api_add_const(root, "timing_mode", timing_mode_str(info->timing_mode), false);
+	root = api_add_bool(root, "is_timing", &(info->do_icarus_timing), false);
+	root = api_add_int(root, "baud", &(info->baud), false);
+	root = api_add_int(root, "work_division", &(info->work_division), false);
+	root = api_add_int(root, "fpga_count", &(info->fpga_count), false);
+
+	return root;
 }
 
 static void icarus_shutdown(struct thr_info *thr)

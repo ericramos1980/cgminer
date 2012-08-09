@@ -163,7 +163,8 @@ enum alive {
 	LIFE_WELL,
 	LIFE_SICK,
 	LIFE_DEAD,
-	LIFE_NOSTART
+	LIFE_NOSTART,
+	LIFE_INIT,
 };
 
 
@@ -220,6 +221,7 @@ struct gpu_adl {
 };
 #endif
 
+struct api_data;
 struct thr_info;
 struct work;
 
@@ -234,7 +236,8 @@ struct device_api {
 	void (*reinit_device)(struct cgpu_info*);
 	void (*get_statline_before)(char*, struct cgpu_info*);
 	void (*get_statline)(char*, struct cgpu_info*);
-	void (*get_api_stats)(char*, struct cgpu_info*, bool);
+	struct api_data *(*get_api_stats)(struct cgpu_info*);
+	bool (*get_stats)(struct cgpu_info*);
 
 	// Thread-specific functions
 	bool (*thread_prepare)(struct thr_info*);
@@ -242,8 +245,9 @@ struct device_api {
 	bool (*thread_init)(struct thr_info*);
 	void (*free_work)(struct thr_info*, struct work*);
 	bool (*prepare_work)(struct thr_info*, struct work*);
-	uint64_t (*scanhash)(struct thr_info*, struct work*, uint64_t);
+	int64_t (*scanhash)(struct thr_info*, struct work*, int64_t);
 	void (*thread_shutdown)(struct thr_info*);
+	void (*thread_enable)(struct thr_info*);
 };
 
 enum dev_enable {
@@ -258,6 +262,7 @@ enum cl_kernels {
 	KL_PHATK,
 	KL_DIAKGCN,
 	KL_DIABLO,
+	KL_SCRYPT,
 };
 
 enum dev_reason {
@@ -269,6 +274,7 @@ enum dev_reason {
 	REASON_DEV_NOSTART,
 	REASON_DEV_OVER_HEAT,
 	REASON_DEV_THERMAL_CUTOFF,
+	REASON_DEV_COMMS_ERROR,
 };
 
 #define REASON_NONE			"None"
@@ -280,6 +286,7 @@ enum dev_reason {
 #define REASON_DEV_NOSTART_STR		"Device failed to start"
 #define REASON_DEV_OVER_HEAT_STR	"Device over heated"
 #define REASON_DEV_THERMAL_CUTOFF_STR	"Device reached thermal cutoff"
+#define REASON_DEV_COMMS_ERROR_STR	"Device comms error"
 #define REASON_UNKNOWN_STR		"Unknown reason - code bug"
 
 #define MIN_SEC_UNSET 99999999
@@ -314,6 +321,15 @@ struct cgpu_info {
 #endif
 		int device_fd;
 	};
+#ifdef USE_BITFORCE
+	struct timeval work_start_tv;
+	unsigned int wait_ms;
+	unsigned int sleep_ms;
+	double avg_wait_f;
+	unsigned int avg_wait_d;
+	uint32_t nonces;
+	bool nonce_range;
+#endif
 	pthread_mutex_t		device_mutex;
 
 	enum dev_enable deven;
@@ -339,10 +355,17 @@ struct cgpu_info {
 	int virtual_adl;
 	int intensity;
 	bool dynamic;
+
 	cl_uint vwidth;
 	size_t work_size;
 	enum cl_kernels kernel;
+	cl_ulong max_alloc;
 
+#ifdef USE_SCRYPT
+	int lookup_gap;
+	int thread_concurrency;
+	int shaders;
+#endif
 	struct timeval tv_gpustart;;
 	struct timeval tv_gpuend;
 	double gpu_us_average;
@@ -378,6 +401,7 @@ struct cgpu_info {
 	int dev_nostart_count;
 	int dev_over_heat_count;	// It's a warning but worth knowing
 	int dev_thermal_cutoff_count;
+	int dev_comms_error_count;
 
 	struct cgminer_stats cgminer_stats;
 };
@@ -408,12 +432,14 @@ struct thr_info {
 	bool	pause;
 	bool	getwork;
 	double	rolling;
+
+	bool	work_restart;
 };
 
 extern int thr_info_create(struct thr_info *thr, pthread_attr_t *attr, void *(*start) (void *), void *arg);
 extern void thr_info_cancel(struct thr_info *thr);
 extern void thr_info_freeze(struct thr_info *thr);
-
+extern void nmsleep(unsigned int msecs);
 
 struct string_elist {
 	char *string;
@@ -531,7 +557,11 @@ extern bool opt_api_listen;
 extern bool opt_api_network;
 extern bool opt_delaynet;
 extern bool opt_restart;
+extern char *opt_icarus_options;
 extern char *opt_icarus_timing;
+#ifdef USE_BITFORCE
+extern bool opt_bfl_noncerange;
+#endif
 
 extern pthread_rwlock_t netacc_lock;
 
@@ -542,7 +572,7 @@ extern json_t *json_rpc_call(CURL *curl, const char *url, const char *userpass,
 extern char *bin2hex(const unsigned char *p, size_t len);
 extern bool hex2bin(unsigned char *p, const char *hexstr, size_t len);
 
-typedef bool (*sha256_func)(int thr_id, const unsigned char *pmidstate,
+typedef bool (*sha256_func)(struct thr_info*, const unsigned char *pmidstate,
 	unsigned char *pdata,
 	unsigned char *phash1, unsigned char *phash,
 	const unsigned char *ptarget,
@@ -550,19 +580,18 @@ typedef bool (*sha256_func)(int thr_id, const unsigned char *pmidstate,
 	uint32_t *last_nonce,
 	uint32_t nonce);
 
-extern int
-timeval_subtract (struct timeval *result, struct timeval *x, struct timeval *y);
-
 extern bool fulltest(const unsigned char *hash, const unsigned char *target);
 
 extern int opt_scantime;
 
-struct work_restart {
-	volatile unsigned long	restart;
-	char			padding[128 - sizeof(unsigned long)];
-};
+extern pthread_mutex_t console_lock;
+
+extern pthread_mutex_t restart_lock;
+extern pthread_cond_t restart_cond;
 
 extern void thread_reportin(struct thr_info *thr);
+extern bool queue_request(struct thr_info *thr, bool needed);
+extern int restart_wait(unsigned int mstime);
 
 extern void kill_work(void);
 
@@ -579,15 +608,20 @@ extern int set_memoryclock(int gpu, int iMemoryClock);
 extern void api(int thr_id);
 
 extern struct pool *current_pool(void);
-extern int active_pools(void);
+extern int enabled_pools;
 extern void add_pool_details(bool live, char *url, char *user, char *pass);
 
 #define MAX_GPUDEVICES 16
 
 #define MIN_INTENSITY -10
 #define _MIN_INTENSITY_STR "-10"
+#ifdef USE_SCRYPT
+#define MAX_INTENSITY 20
+#define _MAX_INTENSITY_STR "20"
+#else
 #define MAX_INTENSITY 14
 #define _MAX_INTENSITY_STR "14"
+#endif
 
 extern struct list_head scan_devices;
 extern int nDevs;
@@ -595,10 +629,15 @@ extern int opt_n_threads;
 extern int num_processors;
 extern int hw_errors;
 extern bool use_syslog;
+extern bool opt_quiet;
 extern struct thr_info *thr_info;
-extern struct work_restart *work_restart;
 extern struct cgpu_info gpus[MAX_GPUDEVICES];
 extern int gpu_threads;
+#ifdef USE_SCRYPT
+extern bool opt_scrypt;
+#else
+#define opt_scrypt (0)
+#endif
 extern double total_secs;
 extern int mining_threads;
 extern struct cgpu_info *cpus;
@@ -620,6 +659,7 @@ extern unsigned int local_work;
 extern unsigned int total_go, total_ro;
 extern const int opt_cutofftemp;
 extern int opt_log_interval;
+extern unsigned long long global_hashrate;
 
 #ifdef HAVE_OPENCL
 typedef struct {
@@ -645,6 +685,9 @@ typedef struct {
 	cl_uint B1addK6, PreVal0addK7, W16addK16, W17addK17;
 	cl_uint zeroA, zeroB;
 	cl_uint oneA, twoA, threeA, fourA, fiveA, sixA, sevenA;
+#ifdef USE_SCRYPT
+	struct work *work;
+#endif
 } dev_blk_ctx;
 #else
 typedef struct {
@@ -777,7 +820,7 @@ extern void switch_pools(struct pool *selected);
 extern void remove_pool(struct pool *pool);
 extern void write_config(FILE *fcfg);
 extern void default_save_file(char *filename);
-extern void log_curses(int prio, const char *f, va_list ap);
+extern bool log_curses_only(int prio, const char *f, va_list ap);
 extern void clear_logwin(void);
 extern bool pool_tclear(struct pool *pool, bool *var);
 extern struct thread_q *tq_new(void);
@@ -789,5 +832,56 @@ extern void tq_thaw(struct thread_q *tq);
 extern bool successful_connect;
 extern void adl(void);
 extern void app_restart(void);
+
+enum api_data_type {
+	API_ESCAPE,
+	API_STRING,
+	API_CONST,
+	API_INT,
+	API_UINT,
+	API_UINT32,
+	API_UINT64,
+	API_DOUBLE,
+	API_ELAPSED,
+	API_BOOL,
+	API_TIMEVAL,
+	API_TIME,
+	API_MHS,
+	API_MHTOTAL,
+	API_TEMP,
+	API_UTILITY,
+	API_FREQ,
+	API_VOLTS,
+	API_HS
+};
+
+struct api_data {
+	enum api_data_type type;
+	char *name;
+	void *data;
+	bool data_was_malloc;
+	struct api_data *prev;
+	struct api_data *next;
+};
+
+extern struct api_data *api_add_escape(struct api_data *root, char *name, char *data, bool copy_data);
+extern struct api_data *api_add_string(struct api_data *root, char *name, char *data, bool copy_data);
+extern struct api_data *api_add_const(struct api_data *root, char *name, const char *data, bool copy_data);
+extern struct api_data *api_add_int(struct api_data *root, char *name, int *data, bool copy_data);
+extern struct api_data *api_add_uint(struct api_data *root, char *name, unsigned int *data, bool copy_data);
+extern struct api_data *api_add_uint32(struct api_data *root, char *name, uint32_t *data, bool copy_data);
+extern struct api_data *api_add_uint64(struct api_data *root, char *name, uint64_t *data, bool copy_data);
+extern struct api_data *api_add_double(struct api_data *root, char *name, double *data, bool copy_data);
+extern struct api_data *api_add_elapsed(struct api_data *root, char *name, double *data, bool copy_data);
+extern struct api_data *api_add_bool(struct api_data *root, char *name, bool *data, bool copy_data);
+extern struct api_data *api_add_timeval(struct api_data *root, char *name, struct timeval *data, bool copy_data);
+extern struct api_data *api_add_time(struct api_data *root, char *name, time_t *data, bool copy_data);
+extern struct api_data *api_add_mhs(struct api_data *root, char *name, double *data, bool copy_data);
+extern struct api_data *api_add_mhstotal(struct api_data *root, char *name, double *data, bool copy_data);
+extern struct api_data *api_add_temp(struct api_data *root, char *name, float *data, bool copy_data);
+extern struct api_data *api_add_utility(struct api_data *root, char *name, double *data, bool copy_data);
+extern struct api_data *api_add_freq(struct api_data *root, char *name, double *data, bool copy_data);
+extern struct api_data *api_add_volts(struct api_data *root, char *name, float *data, bool copy_data);
+extern struct api_data *api_add_hs(struct api_data *root, char *name, double *data, bool copy_data);
 
 #endif /* __MINER_H__ */

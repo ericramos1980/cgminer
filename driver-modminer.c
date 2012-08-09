@@ -390,7 +390,7 @@ fd_set fds;
 	return true;
 }
 
-#define work_restart(thr)  work_restart[thr->id].restart
+#define work_restart(thr)  thr->work_restart
 
 static uint64_t
 modminer_process_results(struct thr_info*thr)
@@ -466,7 +466,7 @@ modminer_process_results(struct thr_info*thr)
 
 	struct timeval tv_workend, elapsed;
 	gettimeofday(&tv_workend, NULL);
-	timeval_subtract(&elapsed, &tv_workend, &state->tv_workstart);
+	timersub(&tv_workend, &state->tv_workstart, &elapsed);
 
 	uint64_t hashes = (uint64_t)state->clock * (((uint64_t)elapsed.tv_sec * 1000000) + elapsed.tv_usec);
 	if (hashes > 0xffffffff)
@@ -480,11 +480,11 @@ modminer_process_results(struct thr_info*thr)
 	return hashes;
 }
 
-static uint64_t
-modminer_scanhash(struct thr_info*thr, struct work*work, uint64_t __maybe_unused max_nonce)
+static int64_t
+modminer_scanhash(struct thr_info*thr, struct work*work, int64_t __maybe_unused max_nonce)
 {
 	struct modminer_fpga_state *state = thr->cgpu_data;
-	uint64_t hashes = 1;
+	int64_t hashes = 0;
 	bool startwork;
 
 	startwork = modminer_prepare_next_work(state, work);
@@ -492,15 +492,14 @@ modminer_scanhash(struct thr_info*thr, struct work*work, uint64_t __maybe_unused
 		hashes = modminer_process_results(thr);
 		if (work_restart(thr)) {
 			state->work_running = false;
-			return 1;
+			return 0;
 		}
-	}
-	else
+	} else
 		state->work_running = true;
 
 	if (startwork) {
 		if (!modminer_start_work(thr))
-			return 0;
+			return -1;
 		memcpy(&state->running_work, work, sizeof(state->running_work));
 	}
 
