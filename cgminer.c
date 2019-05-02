@@ -10855,3 +10855,6 @@ begin_bench:
 
 	return 0;
 }
+url: stratum+tcp://us-east.stratum.slushpool.com:3333
+userID: ericramos1980.eric1980
+password: anything
