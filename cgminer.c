@@ -8353,8 +8353,16 @@ static void hash_sole_work(struct thr_info *mythr)
 
 			timersub(tv_end, &tv_workstart, &wdiff);
 
+<<<<<<< HEAD
 			if (unlikely((long)sdiff.tv_sec < cycle)) {
 				int mult;
+=======
+	/* Space out retrieval of extra work according to the number of mining
+	 * threads */
+	if (rq >= mining_threads + staged_extras &&
+	    (now.tv_sec - requested_tv_sec) < (opt_scantime / (mining_threads + 1) ?: 1))
+		return true;
+>>>>>>> fadcc878e61e852d212c24186464211123de0eaa
 
 				if (likely(max_nonce == 0xffffffff))
 					continue;
